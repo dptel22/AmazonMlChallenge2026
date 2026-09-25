@@ -1,0 +1,7 @@
+{
+  "name": "awesome-tool-finder",
+  "version": "0.1.0",
+  "description": "Recommends AI coding tools by need and category from the awesome-ai-coding-tools curated list",
+  "author": { "name": "dhruv" },
+  "skills": "./skills"
+}

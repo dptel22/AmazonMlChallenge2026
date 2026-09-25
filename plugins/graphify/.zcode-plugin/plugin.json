@@ -1,0 +1,7 @@
+{
+  "name": "graphify",
+  "version": "0.1.0",
+  "description": "Wraps the graphify CLI: build a queryable knowledge graph of a codebase and query it (god nodes, paths, explanations) instead of grepping",
+  "author": { "name": "dhruv" },
+  "skills": "./skills"
+}

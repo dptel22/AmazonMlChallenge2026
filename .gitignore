@@ -1,0 +1,10 @@
+.idea
+.venv
+.mimosa/
+__pycache__/
+*.py[cod]
+/work/
+
+/student_resource/
+student_resource.7z
+

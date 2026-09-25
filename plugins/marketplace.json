@@ -1,0 +1,21 @@
+{
+  "name": "dev-awesome-tool-finder-local",
+  "plugins": [
+    {
+      "name": "awesome-tool-finder",
+      "source": "./awesome-tool-finder",
+      "version": "0.1.0",
+      "description": "Recommends AI coding tools by need and category from the awesome-ai-coding-tools curated list",
+      "displayName": "Awesome Tool Finder",
+      "category": "developer-tools"
+    },
+    {
+      "name": "graphify",
+      "source": "./graphify",
+      "version": "0.1.0",
+      "description": "Wraps the graphify CLI: build a queryable knowledge graph of a codebase and query it (god nodes, paths, explanations) instead of grepping",
+      "displayName": "Graphify",
+      "category": "developer-tools"
+    }
+  ]
+}

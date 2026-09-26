@@ -10,7 +10,7 @@ import sys, os, glob
 import numpy as np
 import pandas as pd
 
-WORK = os.path.join(os.path.dirname(__file__), "..", "..", "..", "work")
+WORK = os.environ.get("WORK_DIR", os.path.join(os.path.dirname(__file__), "..", "..", "..", "work"))
 
 
 def main():

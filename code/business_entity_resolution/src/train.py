@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from evaluate import macro_f05, bucket_report
 
 WORK = os.environ.get("WORK_DIR", "work")   # Kaggle: point at the mounted feature dataset
-GT = os.path.join("student_resource", "dataset", "train", "train_ground_truth.tsv")
+GT = os.path.join(WORK, "ground_truth.tsv")
 
 FEATURES = ["name_jaccard_raw", "name_jaccard_normalized", "name_jaccard_suffix_stripped",
             "name_lev_raw", "name_lev_normalized", "name_lev_suffix_stripped",
@@ -57,6 +57,7 @@ def sweep_thresholds(proba, s1_ids_arr, cand_ids_arr, val_ids, truth_by):
     vmask = np.isin(s1_ids_arr, val_ids)
     v_p, v_s1, v_c = proba[vmask], s1_ids_arr[vmask], cand_ids_arr[vmask]
     val_set = set(val_ids)
+    truth_val = {e: truth_by.get(e, ()) for e in val_set}
     rows = []
     for th in np.arange(0.10, 0.95 + 1e-9, 0.02):
         pred = {e: set() for e in val_set}
@@ -64,8 +65,15 @@ def sweep_thresholds(proba, s1_ids_arr, cand_ids_arr, val_ids, truth_by):
         for e, m in zip(v_s1[sel], v_c[sel]):
             pred[e].add(m)
         rows.append({"threshold": round(float(th), 3),
-                     "macro_f05": macro_f05(pred, truth_by)})
+                     "macro_f05": macro_f05(pred, truth_val)})
     return pd.DataFrame(rows)
+
+
+def make_model_config(threshold, val_macro_f05, per_bucket_f05):
+    """The exact Kaggle-return contract consumed by infer.py."""
+    return {"threshold": float(threshold),
+            "val_macro_f05": float(val_macro_f05),
+            "per_bucket_f05": {k: float(v) for k, v in per_bucket_f05.items()}}
 
 
 def main():
@@ -134,15 +142,14 @@ def main():
     sel = (proba >= best.threshold) & vmask
     for e, m in zip(s1_ids_arr[sel], cand_ids_arr[sel]):
         pred[e].add(m)
-    buckets = bucket_report(pred, truth_by)
+    truth_val = {e: truth_by.get(e, ()) for e in set(val_ids)}
+    buckets = bucket_report(pred, truth_val)
     print("per-bucket F_0.5:", buckets)
 
     os.makedirs(WORK, exist_ok=True)
     model.save_model(os.path.join(WORK, "model.txt"))
-    pd.Series({"threshold": float(best.threshold),
-               "val_macro_f05": float(best.macro_f05),
-               **{f"bucket_{k}": float(v) for k, v in buckets.items()},
-               }).to_json(os.path.join(WORK, "model_config.json"))
+    pd.Series(make_model_config(best.threshold, best.macro_f05, buckets)) \
+        .to_json(os.path.join(WORK, "model_config.json"))
     print(f"saved model.txt + model_config.json in {time.time()-t0:.0f}s")
 
 

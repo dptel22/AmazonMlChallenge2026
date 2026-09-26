@@ -17,7 +17,8 @@ import pandas as pd
 from rapidfuzz import process as rf_process
 from rapidfuzz.distance import Levenshtein
 
-WORK = os.path.join(os.path.dirname(__file__), "..", "..", "..", "work")
+WORK = os.environ.get("WORK_DIR",
+                      os.path.join(os.path.dirname(__file__), "..", "..", "..", "work"))
 GT = os.path.join(WORK, "ground_truth.tsv")
 
 
@@ -46,6 +47,8 @@ def compute_chunk(s1, pool, s1i, ci):
     b_raw = b.business_name.str.lower().str.split().map(set).values
     a_nt = a.name_t.str.split().map(set).values
     b_nt = b.name_t.str.split().map(set).values
+    a_nn = a.name_nt.str.split().map(set).values
+    b_nn = b.name_nt.str.split().map(set).values
     a_raws = a.business_name.str.lower().values
     b_raws = b.business_name.str.lower().values
     a_ns = a.name_s.values
@@ -63,8 +66,8 @@ def compute_chunk(s1, pool, s1i, ci):
     addr_jac = np.full(n, np.nan)
     for i in range(n):
         name_jac_raw[i] = jaccard(a_raw[i], b_raw[i])
-        name_jac_n[i] = jaccard(a_nt[i], b_nt[i])
-        name_jac_s[i] = name_jac_n[i]  # name_t IS the suffix-stripped token bag
+        name_jac_n[i] = jaccard(a_nn[i], b_nn[i])   # normalized, NOT suffix-stripped
+        name_jac_s[i] = jaccard(a_nt[i], b_nt[i])   # suffix-stripped
         overlap[i] = len(a_nt[i] & b_nt[i])
         if a_an[i] and b_an[i]:
             addr_jac[i] = jaccard(a_at[i], b_at[i])
@@ -106,6 +109,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--split", default="train")
     ap.add_argument("--labels", action="store_true", help="join is_match from ground truth (train only)")
+    ap.add_argument("--neg-ratio", type=float, default=0.0,
+                    help="train-side negative downsample: keep each negative with this "
+                         "probability (0 = keep all). Val-entity rows and positives are "
+                         "always kept so the F_0.5 sweep sees full candidate sets.")
     ap.add_argument("--chunk", type=int, default=2_000_000)
     args = ap.parse_args()
 
@@ -116,9 +123,14 @@ def main():
     print(f"s1={len(s1):,} pool={len(pool):,} cand_pairs={len(cands):,}")
 
     gt_map = None
+    val_ids = None
     if args.labels:
         gt = pd.read_csv(GT, sep="\t", dtype=str, keep_default_na=False)
-        gt_map = dict(zip(gt.source1_entity_id, gt.matched_entity_ids))
+        gt_map = {e: (set(m.split(",")) if m else set())
+                  for e, m in zip(gt.source1_entity_id, gt.matched_entity_ids)}
+        val_path = os.path.join(WORK, "val_s1_ids.txt")
+        val_ids = set(pd.read_csv(val_path, header=None)[0].values) \
+            if os.path.exists(val_path) else None
 
     os.makedirs(f"{WORK}/feats_{args.split}", exist_ok=True)
     s1_ids = s1.entity_id.values
@@ -130,10 +142,20 @@ def main():
         df = compute_chunk(s1, pool, blk.s1_idx.values, blk.cand_idx.values)
         if gt_map is not None:
             df["is_match"] = [
-                m in gt_map.get(s1_ids[si], "").split(",") and gt_map.get(s1_ids[si], "") != ""
+                m in gt_map.get(s1_ids[si], ())
                 for si, m in zip(df.s1_idx.values, pool_ids[df.cand_idx.values])
             ]
             df["is_match"] = df.is_match.astype(np.int8)
+            if args.neg_ratio > 0 and val_ids:
+                # keep ALL val-entity rows (sweep needs full candidate sets), all
+                # positives; downsample train-fold negatives with a seeded rng
+                is_val = np.fromiter((s1_ids[si] in val_ids for si in df.s1_idx.values),
+                                     dtype=bool, count=len(df))
+                rng = np.random.default_rng(42 + part)
+                keep = is_val | (df.is_match.values == 1) | \
+                       (rng.random(len(df)) < args.neg_ratio)
+                df = df[keep].reset_index(drop=True)
+                df["is_match"] = df["is_match"].astype(np.int8)
         df.to_parquet(f"{WORK}/feats_{args.split}/part{part:03d}.parquet", index=False)
         pos = df.is_match.mean() if gt_map is not None else float("nan")
         print(f"  part{part:03d}: {len(df):,} rows ({time.time()-t0:.0f}s, pos_rate={pos:.4f})")

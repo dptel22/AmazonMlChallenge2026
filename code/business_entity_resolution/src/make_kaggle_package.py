@@ -19,19 +19,22 @@ WORK = os.path.join(ROOT, "work")
 
 def main():
     out = os.path.join(ROOT, "kaggle_upload.zip")
-    # slim id lookups (entity_id column only, row order = the *_idx space)
-    pd.read_parquet(os.path.join(WORK, "train_s1.parquet"), columns=["entity_id"]) \
-        .to_parquet(os.path.join(WORK, "train_s1_ids.parquet"), index=False)
-    pd.concat([pd.read_parquet(os.path.join(WORK, n), columns=["entity_id"])
-               for n in ("train_s2.parquet", "train_s3.parquet")], ignore_index=True) \
-        .to_parquet(os.path.join(WORK, "train_pool_ids.parquet"), index=False)
+    # slim id lookups: prefer prep.py's output; regenerate if missing
+    s1_ids = os.path.join(WORK, "train_s1_ids.parquet")
+    pool_ids = os.path.join(WORK, "train_pool_ids.parquet")
+    if not (os.path.isfile(s1_ids) and os.path.isfile(pool_ids)):
+        pd.read_parquet(os.path.join(WORK, "train_s1.parquet"), columns=["entity_id"]) \
+            .to_parquet(s1_ids, index=False)
+        pd.concat([pd.read_parquet(os.path.join(WORK, n), columns=["entity_id"])
+                   for n in ("train_s2.parquet", "train_s3.parquet")], ignore_index=True) \
+            .to_parquet(pool_ids, index=False)
 
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         for f in sorted(os.listdir(os.path.join(WORK, "feats_train"))):
             z.write(os.path.join(WORK, "feats_train", f), f"feats_train/{f}")
         z.write(os.path.join(WORK, "val_s1_ids.txt"), "val_s1_ids.txt")
-        z.write(os.path.join(WORK, "train_s1_ids.parquet"), "train_s1_ids.parquet")
-        z.write(os.path.join(WORK, "train_pool_ids.parquet"), "train_pool_ids.parquet")
+        z.write(s1_ids, "train_s1_ids.parquet")
+        z.write(pool_ids, "train_pool_ids.parquet")
         z.write(os.path.join(WORK, "ground_truth.tsv"), "ground_truth.tsv")
         z.write(os.path.join(os.path.dirname(__file__), "train.py"), "train.py")
         z.write(os.path.join(os.path.dirname(__file__), "evaluate.py"), "evaluate.py")

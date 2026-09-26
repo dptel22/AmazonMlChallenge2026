@@ -8,3 +8,9 @@ __pycache__/
 /student_resource/
 student_resource.7z
 
+# Generated Kaggle/upload artifacts; keep the builder and notebook tracked.
+/kaggle_payload/
+/output/
+/graphify-out/
+.pytest_cache/
+

@@ -6,8 +6,11 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(__file__))
 from normalize import norm_name, norm_text, addr_tokens, street_number
 
-BASE = os.path.join(os.path.dirname(__file__), "..", "..", "..", "student_resource", "dataset")
-WORK = os.path.join(os.path.dirname(__file__), "..", "..", "..", "work")
+BASE = os.environ.get("DATA_DIR",
+                      os.path.join(os.path.dirname(__file__), "..", "..", "..",
+                                   "student_resource", "dataset"))
+WORK = os.environ.get("WORK_DIR",
+                      os.path.join(os.path.dirname(__file__), "..", "..", "..", "work"))
 os.makedirs(WORK, exist_ok=True)
 
 

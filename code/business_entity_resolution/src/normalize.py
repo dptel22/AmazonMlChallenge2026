@@ -82,7 +82,12 @@ def transliterate(s):
             pass
         else:
             t = _TR.get(cp)
-            out.append(t if t is not None else " ")
+            if t is not None:
+                out.append(t)
+            elif 0x0900 <= cp <= 0x0D7F:  # Indic char with no mapping -> word break
+                out.append(" ")
+            else:
+                out.append(ch)  # accented Latin etc.: keep for the NFKD fold in norm_text
     return "".join(out)
 
 
@@ -114,11 +119,15 @@ _PUNCTY = set(".,[](){}'\"")
 
 
 def strip_suffixes(name_norm):
-    """Strip legal suffix tokens from both ends of an already-normalized name."""
+    """Strip legal suffix tokens from both ends of an already-normalized name.
+
+    Tokens are compared with wrapper punctuation (brackets/parens/quotes) removed,
+    so "[LLP]" and "(Inc.)" strip like their bare forms.
+    """
     toks = name_norm.split()
-    while toks and (toks[0] in _SUFFIXES or all(c in _PUNCTY for c in toks[0])):
+    while toks and (toks[0].strip(".,[](){}'\"") in _SUFFIXES or all(c in _PUNCTY for c in toks[0])):
         toks.pop(0)
-    while toks and (toks[-1] in _SUFFIXES or all(c in _PUNCTY for c in toks[-1])):
+    while toks and (toks[-1].strip(".,[](){}'\"") in _SUFFIXES or all(c in _PUNCTY for c in toks[-1])):
         toks.pop()
     return " ".join(toks)
 

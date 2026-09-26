@@ -18,7 +18,8 @@ from array import array
 import numpy as np
 import pandas as pd
 
-WORK = os.path.join(os.path.dirname(__file__), "..", "..", "..", "work")
+WORK = os.environ.get("WORK_DIR",
+                      os.path.join(os.path.dirname(__file__), "..", "..", "..", "work"))
 
 
 # ---------- index construction ----------
@@ -120,18 +121,73 @@ def candidates_chunk(s1_chunk, base, index, allowed):
         cand = set()
         for k in record_keys(country, name_s, name_t, addr_t, stno, allowed):
             lst = index.get(k)
-            if lst:
+            # length-check, not truthiness: bool(np.array([0])) is False (element-
+            # dependent) and bool(np.array([0,1])) raises — postings must be judged
+            # by size regardless of container type (array('i') vs np arrays in tests)
+            if lst is not None and len(lst):
                 cand.update(lst)
         out.append(np.fromiter(cand, dtype=np.int64, count=len(cand)) if cand else
                    np.empty(0, dtype=np.int64))
     return out
 
 
-def generate_pairs(s1, index, allowed, chunk_rows=200_000):
-    """Yield (s1_idx_block, cand_idx_block) numpy arrays of equal length."""
+def proxy_scores(s1, pool, cand):
+    """Per-candidate (name_lev_suffix_stripped, addr_lev) arrays via rapidfuzz.
+    Name-only for candidates whose pool address is blank (or when the S1 address
+    is blank) — p_addr falls back to p_name there."""
+    from rapidfuzz import process as rf_process
+    from rapidfuzz.distance import Levenshtein
+    ns = pool.name_s.values[cand]
+    an = pool.addr_n.values[cand]
+    q = [s1["name_s"]] * cand.size
+    p_name = np.array(rf_process.cpdist(q, ns,
+                      scorer=Levenshtein.normalized_similarity, workers=-1))
+    both = (an != "") & bool(s1["addr_n"])
+    p_addr = p_name.copy()          # blank addr -> name-only proxy
+    if both.any():
+        qa = [s1["addr_n"]] * int(both.sum())
+        p_addr[both] = rf_process.cpdist(qa, an[both],
+                       scorer=Levenshtein.normalized_similarity, workers=-1)
+    return p_name, p_addr
+
+
+PROXY_FNS = {
+    "mean": lambda pn, pa: 0.5 * (pn + pa),
+    "max": np.maximum,   # ranks a pair high if EITHER field nearly matches — the
+                         # Jaccard-0 cohort (renames, script switches) needs this
+}
+
+
+def proxy_topk_indices(s1, pool, cand, k, mode="mean"):
+    """Top-k candidate pool indices by the named proxy. Deterministic (stable
+    sort). Safe on empty/short inputs. Same proxy gate2b measures recall@K with."""
+    if cand.size == 0 or k <= 0:
+        return cand[:max(k, 0)] if cand.size else cand
+    if cand.size <= k:
+        return cand
+    p_name, p_addr = proxy_scores(s1, pool, cand)
+    proxy = PROXY_FNS[mode](p_name, p_addr)
+    order = np.argsort(-proxy, kind="stable")
+    return cand[order[:k]]
+
+
+def generate_pairs(s1, index, allowed, pool=None, topk=0, proxy="mean",
+                   chunk_rows=200_000):
+    """Yield (s1_idx_block, cand_idx_block) numpy arrays of equal length.
+
+    topk > 0 (with pool passed) truncates each S1 row's candidates to the top-K by
+    proxy_topk_indices. Rows at or under K are untouched.
+    """
     for base in range(0, len(s1), chunk_rows):
         chunk = s1.iloc[base:base + chunk_rows]
         cands = candidates_chunk(chunk, base, index, allowed)
+        if topk and pool is None:
+            raise ValueError("pool is required when topk is enabled")
+        if topk:
+            for j, c in enumerate(cands):
+                if c.size > topk:
+                    cands[j] = proxy_topk_indices(chunk.iloc[j], pool, c, topk,
+                                                  proxy)
         counts = [len(c) for c in cands]
         s1_side = np.repeat(np.arange(base, base + len(chunk), dtype=np.int64), counts)
         cand_side = np.concatenate(cands) if cands else np.empty(0, dtype=np.int64)
@@ -139,10 +195,16 @@ def generate_pairs(s1, index, allowed, chunk_rows=200_000):
 
 
 def load_pool(split, columns=None):
-    cols = columns or ["entity_id", "country", "name_s", "name_t", "addr_t", "stno"]
+    # default: ALL columns — compute_chunk needs raw name/address, name_n/name_nt
+    # token bags, etc. Slim id-only lookups live in {split}_pool_ids.parquet.
+    if columns is not None:
+        return pd.concat([
+            pd.read_parquet(f"{WORK}/{split}_s2.parquet", columns=columns),
+            pd.read_parquet(f"{WORK}/{split}_s3.parquet", columns=columns),
+        ], ignore_index=True)
     return pd.concat([
-        pd.read_parquet(f"{WORK}/{split}_s2.parquet", columns=cols),
-        pd.read_parquet(f"{WORK}/{split}_s3.parquet", columns=cols),
+        pd.read_parquet(f"{WORK}/{split}_s2.parquet"),
+        pd.read_parquet(f"{WORK}/{split}_s3.parquet"),
     ], ignore_index=True)
 
 
@@ -153,6 +215,11 @@ def main():
     ap.add_argument("--addr-cap", type=int, default=2000)
     ap.add_argument("--sn-cap", type=int, default=2000)
     ap.add_argument("--fn-cap", type=int, default=20000)
+    ap.add_argument("--topk", type=int, default=0,
+                    help="per-S1 candidate cap via proxy ranking (0 = off); "
+                         "volume knob chosen by gate2b recall@K")
+    ap.add_argument("--proxy", default="mean", choices=sorted(PROXY_FNS),
+                    help="proxy aggregation for top-K ranking")
     ap.add_argument("--s1-limit", type=int, default=0)
     ap.add_argument("--out", default="")
     args = ap.parse_args()
@@ -170,7 +237,9 @@ def main():
     out_dir = args.out or os.path.join(WORK, f"{args.split}_cands")
     os.makedirs(out_dir, exist_ok=True)
     total = 0
-    for part, (a, b) in enumerate(generate_pairs(s1, index, allowed)):
+    for part, (a, b) in enumerate(generate_pairs(s1, index, allowed,
+                                                 pool=pool, topk=args.topk,
+                                                 proxy=args.proxy)):
         pd.DataFrame({"s1_idx": a, "cand_idx": b}).to_parquet(
             os.path.join(out_dir, f"part{part:03d}.parquet"), index=False)
         total += len(a)

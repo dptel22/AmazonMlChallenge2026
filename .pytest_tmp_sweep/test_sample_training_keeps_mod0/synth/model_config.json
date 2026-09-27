@@ -1,0 +1,1 @@
+{"threshold":0.74,"val_macro_f05":0.9915789474,"per_bucket_f05":{"0":0.18,"1":null,"2-3":null,"4+":null},"topk":200,"proxy":"mean","caps":{},"max_candidates":2000,"candidate_recall":1.0,"avg_candidates_per_s1":15.76}

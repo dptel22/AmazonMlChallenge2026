@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Phase 2 GATE v2: recall@K after cheap proxy pre-score + per-S1 top-K truncation.
+"""Phase 2 GATE v2: recall@K after sparse TF-IDF proxy + per-S1 top-K truncation.
 
 Motivation (gate2 result): raw key union gives RECALL=97.70% but 14,339 candidates/S1
 → ~31.6B pairs at full scale — infeasible. Fix: rank each S1's candidates by a cheap
-proxy (0.5*name_lev_suffix_stripped + 0.5*addr_lev, rapidfuzz C-speed; name-only when
+proxy (mean or max of word-level name/address TF-IDF cosine; name-only when
 either address is blank) and keep top-K. This gate measures RECALL@K for
-K in {100, 200, 500} at two cap settings so (caps, K) can be picked jointly.
+K in {10, 20, 30, 50, 100, 200, 300, 500, 750, 1000} at two cap settings so (caps, K) can be
+measured jointly for the current configured operating range.
 """
 import sys, os, time
 import numpy as np
@@ -33,6 +34,7 @@ def main():
     pool = load_pool("train", columns=["entity_id", "country", "name_s", "name_t",
                                        "addr_n", "addr_t", "stno"])
     s1 = pd.read_parquet(os.path.join(WORK, "train_s1.parquet"))
+    full_train_s1_count = len(s1)
     val = s1[s1.entity_id.isin(val_ids)].reset_index(drop=True)
     del s1
 
@@ -54,17 +56,29 @@ def main():
             tp_by_s1.setdefault(s, set()).add(pid2i[m])
     del tp, pid2i
     naive = len(val) * len(pool)
-    ks = [100, 200, 300, 500]
-    proxy_names = sorted(PROXY_FNS)
-
-    # precompute allowed sets for every setting, then DROP the df dicts (~1.5GB)
-    settings = [(1000, 2000, 2000, 20000), (200, 300, 500, 5000)]
-    allowed_by_setting = [make_allowed(dfs, *s) for s in settings]
+    ks = [10, 20, 30, 50, 100, 200, 300, 500, 750, 1000]
+    # Only measure the configured broad-cap/mean operating path here. The
+    # previous sweep held duplicate df maps, two large allowlists, both proxy
+    # result tables, and the 115M-posting index at once; that exceeded Colab's
+    # 12.7 GB worker after index construction. Reuse the index's key objects
+    # for the allowlist instead of copying millions of df keys into new sets.
+    proxy_names = ["mean"]
+    settings = [(1000, 2000, 2000, 20000)]
+    tok, addr_, sn, fn = settings[0]
+    limits = {"c3": 2000, "t": tok, "a": addr_, "sn": sn, "fn": fn}
+    allowed = {family: set() for family in limits}
+    for key, postings in index.items():
+        family = key.split("|", 1)[0]
+        if len(postings) <= limits[family]:
+            allowed[family].add(key)
+    print(f"  allowed keys: c3={len(allowed['c3'])} t={len(allowed['t'])} "
+          f"a={len(allowed['a'])} sn={len(allowed['sn'])} fn={len(allowed['fn'])}",
+          flush=True)
     del dfs
     import gc
     gc.collect()
 
-    for (tok, addr_, sn, fn), allowed in zip(settings, allowed_by_setting):
+    for (tok, addr_, sn, fn) in settings:
         t0 = time.time()
         hits = {p: {k: 0 for k in ks} for p in proxy_names}
         n_kept = {k: 0 for k in ks}
@@ -75,6 +89,8 @@ def main():
                 cands = candidates_chunk(chunk, base, index, allowed)
                 for j, c in enumerate(cands):
                     n_union += len(c)
+                    for k in ks:
+                        n_kept[k] += min(k, len(c))
                     truth = tp_by_s1.get(chunk.entity_id.values[j], ())
                     if not truth or c.size == 0:
                         continue
@@ -86,8 +102,6 @@ def main():
                         for k in ks:
                             top = c[order[:k]]
                             hits[p][k] += len(set(top.tolist()) & truth)
-                    for k in ks:
-                        n_kept[k] += min(k, len(c))
                 del cands
                 if (base // 50_000) % 2 == 1:
                     print(f"  ... {base + 50_000:,}/{len(val):,} val rows "
@@ -105,6 +119,11 @@ def main():
             for k in ks:
                 line += f"recall@{k}={hits[p][k]/r:.4%} "
             print(line, flush=True)
+        for k in ks:
+            avg_kept = n_kept[k] / max(len(val), 1)
+            estimate = round(avg_kept * full_train_s1_count)
+            print(f"  K={k}: {avg_kept:.1f} candidates/S1; "
+                  f"estimated train candidate pairs={estimate:,}", flush=True)
         gc.collect()
 
 

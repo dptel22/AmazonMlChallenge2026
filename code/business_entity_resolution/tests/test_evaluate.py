@@ -1,6 +1,7 @@
 import os
 import random
 import sys
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -34,6 +35,11 @@ def test_three_entity_macro_case_matches_hand_calculation():
     truths = {"e1": ["a", "b", "c"], "e2": [], "e3": ["y"]}
     expected = ((2 / 3) + 1.0 + 0.0) / 3
     assert abs(macro_f05(preds, truths) - expected) < 1e-12
+
+
+def test_macro_rejects_mismatched_entity_populations():
+    with pytest.raises(ValueError, match="populations differ"):
+        macro_f05({"e1": []}, {"e1": [], "e2": []})
 
 
 def test_randomized_monte_carlo_matches_independent_formula():

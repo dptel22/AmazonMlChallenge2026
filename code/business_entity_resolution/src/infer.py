@@ -17,20 +17,23 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(__file__))
-from blocking import build_index, make_allowed, candidates_chunk
+from blocking import build_index, make_allowed, candidates_chunk, batch_topk_prune
 from features import compute_chunk
+from pipeline_state import ensure_local_path, prepare_stage, write_manifest
 
 _SRC = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.normpath(os.path.join(_SRC, os.pardir, os.pardir, os.pardir))
 # OUTPUT_DIR override: on Kaggle src is copied shallow (/kaggle/working/src) so the
 # 3-up default would land on /kaggle — the notebook pins it to /kaggle/working/output.
-OUT = os.environ.get("OUTPUT_DIR", os.path.join(_ROOT, "output"))
-WORK = os.environ.get("WORK_DIR", os.path.join(_ROOT, "work"))
-DEFAULT_CAPS = dict(token_cap=1000, addr_cap=2000, sn_cap=2000, fn_cap=20000)
+OUT = ensure_local_path(os.environ.get("OUTPUT_DIR", os.path.join(_ROOT, "output")))
+WORK = ensure_local_path(os.environ.get("WORK_DIR", os.path.join(_ROOT, "work")))
+DEFAULT_CAPS = dict(token_cap=1000, addr_cap=2000, sn_cap=2000, fn_cap=20000, c3_cap=2000)
+PAIR_BUDGET = 100_000
+MAX_CANDIDATES = 2_000
 
 FEATURES = ["name_jaccard_raw", "name_jaccard_normalized", "name_jaccard_suffix_stripped",
-            "name_lev_raw", "name_lev_normalized", "name_lev_suffix_stripped",
-            "addr_jaccard", "addr_lev", "token_overlap_count",
+            "name_cos", "addr_cos",
+            "addr_jaccard", "token_overlap_count",
             "street_number_match", "missing_address_flag",
             "len_delta_name", "len_delta_addr"]
 
@@ -85,17 +88,19 @@ def main():
         s1 = s1.iloc[:args.s1_limit]
     print(f"test: s1={len(s1):,} pool={len(pool):,}", flush=True)
 
-    index, dfs = build_index(pool)
-    allowed = make_allowed(dfs, **DEFAULT_CAPS)
-    del dfs
-
     if args.dummy:
         threshold = args.threshold if args.threshold is not None else 0.75
+        cfg = {"threshold": threshold, "topk": 500, "proxy": "max"}
     else:
         if args.threshold is not None:
             print("NOTE: --threshold ignored in real mode (model_config.json is authoritative)")
         model, threshold, cfg = load_model()
         print(f"model loaded: threshold={threshold} val_macro_f05={cfg.get('val_macro_f05')}")
+        DEFAULT_CAPS.update(cfg.get("caps", {}))
+
+    index, dfs = build_index(pool)
+    allowed = make_allowed(dfs, **DEFAULT_CAPS)
+    del dfs
 
     s1_ids = s1.entity_id.values
     pool_ids = pool.entity_id.values
@@ -104,34 +109,43 @@ def main():
     c_path = os.path.join(OUT, "candidate_pairs.tsv")
     n_cand = n_kept = 0
     subset_violations = 0
-    W = 200_000
+    topk = int(cfg.get("topk", 500))
+    proxy = str(cfg.get("proxy", "max"))
+    max_candidates = int(cfg.get("max_candidates", MAX_CANDIDATES))
+    stage_config = {"caps": DEFAULT_CAPS, "max_candidates": max_candidates,
+                    "pair_budget": PAIR_BUDGET, "topk": topk, "proxy": proxy,
+                    "threshold": threshold, "s1_limit": args.s1_limit}
+    prepare_stage(OUT, "test_inference", stage_config)
+    output_files = [m_path, c_path]
+    W = 2_048
     for base in range(0, len(s1), W):
         chunk = s1.iloc[base:base + W]
         chunk_ids = chunk.entity_id.values
-        cands = candidates_chunk(chunk, base, index, allowed)
+        cands = candidates_chunk(chunk, base, index, allowed, max_candidates)
+        cands = batch_topk_prune(chunk, pool, cands, topk, proxy, PAIR_BUDGET)
         counts = [len(c) for c in cands]
         si = np.repeat(np.arange(base, base + len(chunk), dtype=np.int64), counts)
         ci = np.concatenate(cands) if cands else np.empty(0, dtype=np.int64)
         del cands
-        keep = None
-        if len(si):
-            df = compute_chunk(s1, pool, si, ci)
+        keep = np.zeros(len(si), dtype=bool)
+        cand_by, kept_by = {}, {}
+        for pair_base in range(0, len(si), PAIR_BUDGET):
+            pair_end = min(pair_base + PAIR_BUDGET, len(si))
+            si_part, ci_part = si[pair_base:pair_end], ci[pair_base:pair_end]
+            df = compute_chunk(s1, pool, si_part, ci_part)
             if args.dummy:
-                proba = 0.5 * df.name_lev_normalized.fillna(0) + 0.5 * df.addr_lev.fillna(0)
+                proba = 0.5 * df.name_cos.fillna(0) + 0.5 * df.addr_cos.fillna(0)
             else:
                 proba = model.predict(df[FEATURES])
-            keep = proba >= threshold
-            cand_by, kept_by = group_rows(si, pool_ids[ci], s1_ids, keep)
-            del df
-            # matches ⊆ candidates, enforced at write time
-            for e, ms in kept_by.items():
-                cs = set(cand_by.get(e, ()))
-                extra = [m for m in dict.fromkeys(ms) if m not in cs]
-                if extra:
-                    subset_violations += 1
-                    cand_by.setdefault(e, []).extend(extra)
-        else:
-            cand_by, kept_by = {}, {}
+            keep_part = np.asarray(proba >= threshold)
+            keep[pair_base:pair_end] = keep_part
+            cand_part, kept_part = group_rows(si_part, pool_ids[ci_part], s1_ids, keep_part)
+            for e, ids in cand_part.items(): cand_by.setdefault(e, []).extend(ids)
+            for e, ids in kept_part.items(): kept_by.setdefault(e, []).extend(ids)
+            del df, si_part, ci_part, proba, keep_part, cand_part, kept_part
+        for e, ms in kept_by.items():
+            if not set(ms).issubset(set(cand_by.get(e, ()))):
+                raise AssertionError(f"match outside candidate list for {e}")
         first = base == 0
         # one row per chunk entity, exactly once: to_csv append, header on first chunk
         pd.DataFrame([(e, ",".join(dict.fromkeys(kept_by.get(e, ())))) for e in chunk_ids],
@@ -148,7 +162,8 @@ def main():
               f"{n_kept:,} kept ({time.time()-t0:.0f}s)", flush=True)
         del si, ci, cand_by, kept_by
     print(f"wrote {len(s1):,} entity rows ({n_cand:,} candidate pairs, {n_kept:,} kept, "
-          f"{subset_violations} subset violations fixed) in {time.time()-t0:.0f}s")
+          f"zero subset violations) in {time.time()-t0:.0f}s")
+    write_manifest(OUT, "test_inference", stage_config, output_files, len(s1))
 
 
 if __name__ == "__main__":

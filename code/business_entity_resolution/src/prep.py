@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """Phase 2a: normalize all source files once, cache to parquet for blocking/features."""
-import sys, os, time
+import sys, os, time, shutil
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(__file__))
 from normalize import norm_name, norm_text, addr_tokens, street_number
+from pipeline_state import ensure_local_path
 
 BASE = os.environ.get("DATA_DIR",
                       os.path.join(os.path.dirname(__file__), "..", "..", "..",
@@ -12,6 +13,16 @@ BASE = os.environ.get("DATA_DIR",
 WORK = os.environ.get("WORK_DIR",
                       os.path.join(os.path.dirname(__file__), "..", "..", "..", "work"))
 os.makedirs(WORK, exist_ok=True)
+
+
+def copy_ground_truth(source=None, work_dir=WORK):
+    """Place labels where blocking gates, features, and training expect them."""
+    work_dir = ensure_local_path(work_dir)
+    source = ensure_local_path(source or f"{BASE}/train/train_ground_truth.tsv")
+    os.makedirs(work_dir, exist_ok=True)
+    target = ensure_local_path(os.path.join(work_dir, "ground_truth.tsv"))
+    shutil.copyfile(source, target)
+    return target
 
 
 def prep_file(path, out, source_label=None):
@@ -42,6 +53,9 @@ def save_slim_ids(split):
 
 
 if __name__ == "__main__":
+    # Local gates, labeled feature generation, and train.py read this common path.
+    # Keep the source data immutable and make the copy as part of the prep stage.
+    copy_ground_truth()
     for split in ("train", "test"):
         prep_file(f"{BASE}/{split}/{split}_source1.tsv", f"{WORK}/{split}_s1.parquet", "S1")
         prep_file(f"{BASE}/{split}/{split}_source2.tsv", f"{WORK}/{split}_s2.parquet", "S2")

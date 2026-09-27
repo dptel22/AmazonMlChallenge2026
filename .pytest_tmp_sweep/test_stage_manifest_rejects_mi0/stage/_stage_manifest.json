@@ -1,0 +1,1 @@
+{"complete": true, "config": {"seed": 42}, "files": [{"bytes": 8, "name": "part000.parquet", "path": "C:\\Users\\dhruv\\PycharmProjects\\AmazonMlChallenge2026\\.pytest_tmp_sweep\\test_stage_manifest_rejects_mi0\\stage\\part000.parquet"}], "stage": "features", "total_rows": 8}

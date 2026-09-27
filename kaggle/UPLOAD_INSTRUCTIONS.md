@@ -22,8 +22,8 @@ kaggle_payload/
 └── val_s1_ids.txt          THE 18% val split (random_state=42)
 ```
 
-(The builder currently also packs `src/`, `stages.py`, `utils/`, README/docs —
-unused by the notebook, harmless to leave in.) Note: the notebook copies ground
+(The payload builder contains only the raw dataset and required metadata; the
+notebook is self-contained and does not depend on `src/` or `stages.py`.) Note: the notebook copies ground
 truth from `dataset/train/train_ground_truth.tsv` and regenerates the val split
 with the same `random_state=42`, so the top-level `ground_truth.tsv` /
 `val_s1_ids.txt` are belt-and-braces — the split is identical on a full run.

@@ -26,7 +26,10 @@ def f05_entity(pred, true):
 
 def macro_f05(preds_by_entity, truths_by_entity):
     """preds/truths: dict entity_id -> iterable of matched ids (or lists aligned by key)."""
-    keys = set(preds_by_entity) | set(truths_by_entity)
+    pred_keys, truth_keys = set(preds_by_entity), set(truths_by_entity)
+    if pred_keys != truth_keys:
+        raise ValueError("prediction and truth entity populations differ")
+    keys = pred_keys
     scores = [f05_entity(preds_by_entity.get(k, ()), truths_by_entity.get(k, ()))
               for k in keys]
     return float(np.mean(scores))
@@ -35,7 +38,10 @@ def macro_f05(preds_by_entity, truths_by_entity):
 def bucket_report(preds_by_entity, truths_by_entity, thresholds=None):
     """Macro F_0.5 broken out by true match-count bucket: 0 / 1 / 2-3 / 4+."""
     buckets = {"0": [], "1": [], "2-3": [], "4+": []}
-    keys = set(preds_by_entity) | set(truths_by_entity)
+    pred_keys, truth_keys = set(preds_by_entity), set(truths_by_entity)
+    if pred_keys != truth_keys:
+        raise ValueError("prediction and truth entity populations differ")
+    keys = pred_keys
     for k in keys:
         n = len(truths_by_entity.get(k, ()))
         b = "0" if n == 0 else "1" if n == 1 else "2-3" if n <= 3 else "4+"

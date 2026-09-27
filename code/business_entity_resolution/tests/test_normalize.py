@@ -3,6 +3,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+import normalize
 from normalize import norm_name, norm_text, street_number, strip_suffixes, transliterate
 
 
@@ -55,6 +56,51 @@ def test_street_number_only_accepts_leading_numeric_token():
 def test_zwnj_is_removed_without_inserting_a_space():
     assert transliterate("ab\u200ccd") == "abcd"
     assert norm_text("ab\u200ccd") == "abcd"
+
+
+def test_translate_fast_path_preserves_previous_character_mapping():
+    sample = "ASCII acme café" + "".join(chr(cp) for cp in range(0x0900, 0x0D80)) + "x\u200cy\u200d"
+    expected = []
+    for ch in sample:
+        cp = ord(ch)
+        if cp < 0x80:
+            expected.append(ch)
+        elif cp in (0x200C, 0x200D):
+            pass
+        elif normalize._TR.get(cp) is not None:
+            expected.append(normalize._TR[cp])
+        elif 0x0900 <= cp <= 0x0D7F:
+            expected.append(" ")
+        else:
+            expected.append(ch)
+    assert transliterate(sample) == "".join(expected)
+    assert transliterate("ASCII only") == "ASCII only"
+
+
+def test_frame_cos_rows_rebuilds_attrs_cache_inherited_by_iloc():
+    import numpy as np
+    import pandas as pd
+
+    pool = pd.DataFrame({
+        "name_s": ["acme market", "other place"],
+        "addr_n": ["1 main road", "2 oak street"],
+    })
+    parent = pd.DataFrame({
+        "name_s": ["acme market", "other place"],
+        "addr_n": ["1 main road", "2 oak street"],
+    })
+    normalize.attach_cosine(pool)
+    normalize.frame_cos_rows(parent, pool)
+
+    chunk = parent.iloc[1:2]
+    assert chunk.attrs["_cos"]["owner"] == id(parent)
+    normalize.frame_cos_rows(chunk, pool)
+
+    assert chunk.attrs["_cos"]["owner"] == id(chunk)
+    assert chunk.attrs["_cos"]["Xn"].shape[0] == 1
+    name_cos, _ = normalize.cos_pair_scores(
+        chunk, pool, np.array([0]), np.array([1]))
+    assert name_cos[0] > 0.999
 
 
 if __name__ == "__main__":

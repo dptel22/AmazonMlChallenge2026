@@ -5,7 +5,11 @@ __pycache__/
 *.py[cod]
 /work/
 
-/student_resource/
+# Challenge materials: track docs + validator, ignore the multi-GB dataset.
+/student_resource/*
+!student_resource/README.md
+!student_resource/Documentation_template.md
+!student_resource/utils/
 student_resource.7z
 
 # Generated Kaggle/upload artifacts; keep the builder and notebook tracked.
@@ -13,4 +17,6 @@ student_resource.7z
 /output/
 /graphify-out/
 .pytest_cache/
-
+.pytest_tmp*/
+/work_nb/
+/work_tiny/
